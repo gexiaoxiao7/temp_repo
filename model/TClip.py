@@ -38,7 +38,7 @@ class VideoEncoder(nn.Module):
         video_feature = torch.mean(image_features, dim=1)
 
         # video_feature = torch.unsqueeze(video_feature, 0)
-        if self.config.TEMPORAL_POOLING == 'mean':
+        if self.config.MODEL.TEMPORAL_POOLING == 'mean':
             return video_feature, None
         else:
             return video_feature, attention_format_features

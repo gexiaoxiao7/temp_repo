@@ -25,7 +25,7 @@ class BaseDataset(Dataset, metaclass=ABCMeta):
             device = device,
             shot = shot,
             type = type,
-            if_teacher = config.DATA.IF_TEACHER,
+            if_teacher = config.MODEL.IF_TEACHER,
             detector = TeacherDetection(config.MODEL.YOLO)
         )
 

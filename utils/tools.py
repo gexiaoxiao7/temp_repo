@@ -41,7 +41,7 @@ class AverageMeter:
 
 def clip_classifier(classnames,clip_model,config,device):
     with torch.no_grad():
-        if config.TEXT_PROMPT.ONLY_LABEL == 0:
+        if config.MODEL.LP == 0:
             prompts = ['The person was ' + x + '.' for x in classnames]
         else:
             prompts = classnames
@@ -93,20 +93,29 @@ def build_cache_model(config, clip_model, train_loader_cache,logger):
         cache_keys = cache_keys.permute(1, 0)
         cache_values = F.one_hot(torch.cat(cache_values, dim=0)).half()
 
-        torch.save(cache_keys, config.TIP_ADAPTER.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-        torch.save(cache_values, config.TIP_ADAPTER.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
+        torch.save(cache_keys, config.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
+        torch.save(cache_values, config.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
 
     else:
-        cache_keys = torch.load(config.TIP_ADAPTER.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-        cache_values = torch.load(config.TIP_ADAPTER.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
+        cache_keys = torch.load(config.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
+        cache_values = torch.load(config.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
 
     return cache_keys, cache_values
 
 
 def pre_load_features(config, split, clip_model, loader):
-    if config.TIP_ADAPTER.LOAD_PRE_FEAT == 0:
+    
+    if (
+            os.path.exists(config.CACHE_DIR + "/" + split + "_f.pt") 
+            and os.path.exists(config.CACHE_DIR + "/" + split + "_l.pt") 
+            and os.path.exists(config.CACHE_DIR + "/" + split + "_a.pt")
+    ):
+        features = torch.load(config.CACHE_DIR + "/" + split + "_f.pt")
+        labels = torch.load(config.CACHE_DIR + "/" + split + "_l.pt")
+        attention_feature = torch.load(config.CACHE_DIR + "/" + split + "_a.pt")
+        return features, labels, attention_feature
+    else:
         features, labels ,attention_feature = [], [], []
-
         with torch.no_grad():
             for idx, batch_data in enumerate(tqdm(loader)):
                 images = batch_data['data'] #list: len:num_frame, shape:(b,1,c,h,w)
@@ -122,15 +131,10 @@ def pre_load_features(config, split, clip_model, loader):
                 attention_feature.append(attention_format_feature)
 
         features, labels, attention_feature = torch.cat(features), torch.cat(labels), torch.cat(attention_feature)
-        torch.save(features, config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_f.pt")
-        torch.save(labels, config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_l.pt")
-        torch.save(attention_feature, config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_a.pt")
-
-    else:
-        features = torch.load(config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_f.pt")
-        labels = torch.load(config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_l.pt")
-        attention_feature = torch.load(config.TIP_ADAPTER.CACHE_DIR + "/" + split + "_a.pt")
-    return features, labels, attention_feature
+        torch.save(features, config.CACHE_DIR + "/" + split + "_f.pt")
+        torch.save(labels, config.CACHE_DIR + "/" + split + "_l.pt")
+        torch.save(attention_feature, config.CACHE_DIR + "/" + split + "_a.pt")
+        return features, labels, attention_feature
 
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt

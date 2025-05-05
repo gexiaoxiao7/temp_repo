@@ -178,7 +178,11 @@ def build_dataloader(config,logger):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     _, preprocess = clip.load(config.MODEL.ARCH, device=device)
 
-    if config.TIP_ADAPTER.LOAD_PRE_FEAT == 0:
+    if (
+            os.path.exists(config.CACHE_DIR + "/" + split + "_f.pt")
+            and os.path.exists(config.CACHE_DIR + "/" + split + "_l.pt")
+            and os.path.exists(config.CACHE_DIR + "/" + split + "_a.pt")
+    ):
         test_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TEST_FILE,type='test')
         sampler_test = SubsetRandomSampler(np.arange(len(test_data)))
         test_loader = DataLoader(test_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,

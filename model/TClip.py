@@ -210,7 +210,7 @@ class TBA_Clip(nn.Module):
         image_features,attention_format_features = self.image_encoder(image)
         norm = image_features.norm(dim=-1, keepdim=True)
         image_feature = image_features / norm
-        if self.config.TRAIN.LP == 1:
+        if self.config.MODEL.LP == 1:
             tokenized_prompts = self.tokenized_prompts
             logit_scale = self.logit_scale.exp()
             prompts = self.prompts_learner(image_feature)

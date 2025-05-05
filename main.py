@@ -255,9 +255,8 @@ def main(config):
     if os.stat(config.OUTPUT).st_size == 0:
         with open(config.OUTPUT, 'a') as f:
             # Write the column names
-            f.write('Model,Arch,If_teacher,Num_Frames,Acc1,Acc3,Acc5,AUC,F1,Dataset,Shots,n_ctx,cache_size,TEMPORAL_POOLING, test_file\n')
-    (train_cache_data, val_data, test_data,train_data_F, train_data_a,
-     train_load_cache, val_loader, test_loader, train_load_F, train_load_a)= build_dataloader(config, logger)
+            f.write('Model,Arch,If_teacher,Num_Frames,Acc1,Acc3,Acc5,AUC,F1,Dataset,Shots,n_ctx,TEMPORAL_POOLING, test_file\n')
+    val_data, test_data,train_data_F,train_data_a, val_loader, test_loader,train_load_F, train_load_a = build_dataloader(config, logger)
     class_names = [class_name for i, class_name in classes(config)]
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -287,25 +286,25 @@ def main(config):
         with open(config.OUTPUT, 'a') as f:
             f.write(
                 f'Zero-shot,{config.MODEL.ARCH},{config.MODEL.IF_TEACHER},{config.DATA.NUM_FRAMES},{acc1:.3f},{acc3:.3f},{acc5:.3f},{auc:.3f},{f1:.3f},{config.DATA.DATASET},'
-                f'0 ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.DATA.CACHE_SIZE},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
+                f'0 ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
     else:
         if config.MODEL.TEMPORAL_POOLING == 'attention':
-            test_features = test_features.squeeze(1) if config.TEMPORAL_POOLING != 'attention' else attention_Fuc(
+            test_features = test_features.squeeze(1) if config.MODEL.TEMPORAL_POOLING != 'attention' else attention_Fuc(
                 attention_net,
                 attention_test_feature, test_features)
-            val_features = val_features.squeeze(1) if config.TEMPORAL_POOLING != 'attention' else attention_Fuc(
+            val_features = val_features.squeeze(1) if config.MODEL.TEMPORAL_POOLING != 'attention' else attention_Fuc(
                 attention_net, attention_val_feature,
                 val_features)
-        clip_logits = 100. * test_features @ clip_weights.T if config.TRAIN.LP == 0 else promptlearner_Fuc(
+        clip_logits = 100. * test_features @ clip_weights.T if config.MODEL.LP == 0 else promptlearner_Fuc(
             prompt_learner, test_features, model)
         acc1, acc3, acc5, auc, f1 = validate(clip_logits, test_labels)
         logger.info(
-            "**** Tip-Adapter-F's test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
+            "**** test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
                 acc1, acc3, acc5, auc, f1))
         with open(config.OUTPUT, 'a') as f:
             f.write(
                 f'Tip-Adapter-F,{config.MODEL.ARCH},{config.MODEL.IF_TEACHER},{config.DATA.NUM_FRAMES},{acc1:.3f},{acc3:.3f},{acc5:.3f},{auc:.3f},{f1:.3f},{config.DATA.DATASET},'
-                f'{config.DATA.SHOTS} ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.DATA.CACHE_SIZE},{config.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
+                f'{config.DATA.SHOTS} ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
 
 
 

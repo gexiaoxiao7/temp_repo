@@ -183,20 +183,15 @@ def build_dataloader(config,logger):
             and os.path.exists(config.CACHE_DIR + "/" + "test_l.pt")
             and os.path.exists(config.CACHE_DIR + "/"  + "test_a.pt")
     ):
+        test_data = None
+        test_loader = None
+    else:
         test_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TEST_FILE,type='test')
         sampler_test = SubsetRandomSampler(np.arange(len(test_data)))
         test_loader = DataLoader(test_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
                                  num_workers=16, pin_memory=True, drop_last=True)
-    else:
-        test_data = None
-        test_loader = None
+
     logger.info("test_data_finished!")
-
-
-    train_chache_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TRAIN_FILE,shot=config.DATA.CACHE_SIZE,type='train_cache')
-    sampler_test = SubsetRandomSampler(np.arange(len(train_chache_data)))
-    train_loader_cache = DataLoader(train_chache_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                             num_workers=16, pin_memory=True, drop_last=True)
 
     train_data_F = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TRAIN_FILE,
                                      shot=config.DATA.SHOTS, type='train_F')
@@ -215,4 +210,4 @@ def build_dataloader(config,logger):
     sampler_test = SubsetRandomSampler(np.arange(len(train_data_a)))
     train_load_a = DataLoader(train_data_a, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
                              num_workers=16, pin_memory=True, drop_last=True)
-    return train_chache_data, val_data, test_data,train_data_F,train_data_a, train_loader_cache, val_loader, test_loader,train_load_F, train_load_a
+    return  val_data, test_data,train_data_F,train_data_a, val_loader, test_loader,train_load_F, train_load_a

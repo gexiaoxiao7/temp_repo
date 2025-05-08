@@ -172,7 +172,6 @@ def main(config):
         images = torch.transpose(images, 0, 1)
         label_id = batch_data['label']
         logits, image_features, text_features = model(images)
-        logits = torch.stack(logits)
         label_id = label_id.to(logits.device)
         logits_list.append(logits)
         label_list.append(label_id)

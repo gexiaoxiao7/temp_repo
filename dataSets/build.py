@@ -84,7 +84,7 @@ class VideoDataset(BaseDataset):
         video_infos = []
         class_counts = {}
         total_lines = sum(1 for line in open(ann_file, 'r'))
-        if type == 'train_cache':
+        if type == 'train':
             with open(ann_file, 'r') as fin:
                 lines = fin.readlines()
                 for idx in range(total_lines):  # Start from the last third
@@ -104,10 +104,9 @@ class VideoDataset(BaseDataset):
                             class_counts[label] = 1
                         else:
                             class_counts[label] += 1
-        elif type == 'train_a':
+        elif type == 'test':
             with open(ann_file, 'r') as fin:
                 lines = fin.readlines()
-                # start_idx = int(total_lines * 1 / 3)  # Calculate the start index
                 for idx in range(total_lines):  # Start from the last third
                     if idx % 5 == 0 and idx != 0:
                         progress = (idx / total_lines) * 100
@@ -116,42 +115,10 @@ class VideoDataset(BaseDataset):
                     line_split = line.strip().split()
                     filename, label = line_split
                     label = int(label)
-                    if label in class_counts and class_counts[label] >= shot:
-                        continue
                     data = self.prepare_frames(data_prefix + filename, num_frames, if_teacher, detector, preprocess)
                     if data is not None:
                         video_infos.append(dict(filename=filename, label=label, data=data))
-                        if label not in class_counts:
-                            class_counts[label] = 1
-                        else:
-                            class_counts[label] += 1
-        else:
-            with open(ann_file, 'r') as fin:
-                for idx, line in enumerate(fin):
-                    if idx % 5 == 0 and idx != 0:
-                        progress = (idx / total_lines) * 100
-                        print(f'Processed {idx} samples, progress: {progress:.2f}%')
-                    line_split = line.strip().split()
-                    filename, label = line_split
-                    label = int(label)
-                    if type == 'train_F':
-                        if label in class_counts and class_counts[label] >= shot:
-                            continue
-                        data = self.prepare_frames(data_prefix + filename, num_frames, if_teacher, detector, preprocess)
-                        if data is not None:
-                            video_infos.append(dict(filename=filename, label=label, data=data))
-                            if label not in class_counts:
-                                class_counts[label] = 1
-                            else:
-                                class_counts[label] += 1
-                    else:
-                        data = self.prepare_frames(data_prefix + filename, num_frames, if_teacher, detector, preprocess)
-                        if data is not None:
-                            video_infos.append(dict(filename=filename, label=label, data=data))
-                            if label not in class_counts:
-                                class_counts[label] = 1
-                            else:
-                                class_counts[label] += 1
+
         return video_infos
 
 

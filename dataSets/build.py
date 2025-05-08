@@ -87,7 +87,6 @@ class VideoDataset(BaseDataset):
         if type == 'train_cache':
             with open(ann_file, 'r') as fin:
                 lines = fin.readlines()
-                # start_idx = int(total_lines * 2 / 3)  # Calculate the start index
                 for idx in range(total_lines):  # Start from the last third
                     if idx % 5 == 0 and idx != 0:
                         progress = (idx / total_lines) * 100
@@ -175,39 +174,20 @@ class SubsetRandomSampler(torch.utils.data.Sampler):
         self.epoch = epoch
 
 def build_dataloader(config,logger):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     _, preprocess = clip.load(config.MODEL.ARCH, device=device)
 
-    if (
-            os.path.exists(config.CACHE_DIR + "/" + "test_f.pt")
-            and os.path.exists(config.CACHE_DIR + "/" + "test_l.pt")
-            and os.path.exists(config.CACHE_DIR + "/"  + "test_a.pt")
-    ):
-        test_data = None
-        test_loader = None
-    else:
-        test_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TEST_FILE,type='test')
-        sampler_test = SubsetRandomSampler(np.arange(len(test_data)))
-        test_loader = DataLoader(test_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                                 num_workers=16, pin_memory=True, drop_last=True)
+    test_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TEST_FILE,type='test')
+    sampler_test = SubsetRandomSampler(np.arange(len(test_data)))
+    test_loader = DataLoader(test_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
+                                 num_workers=12, pin_memory=True, drop_last=True)
 
     logger.info("test_data_finished!")
 
-    train_data_F = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TRAIN_FILE,
-                                     shot=config.DATA.SHOTS, type='train_F')
-    sampler_test = SubsetRandomSampler(np.arange(len(train_data_F)))
-    train_load_F = DataLoader(train_data_F, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                             num_workers=16, pin_memory=True, drop_last=True)
-    val_data, _ = split_dataset(train_data_F)
-    sampler_test = SubsetRandomSampler(np.arange(len(val_data)))
-    val_loader = DataLoader(val_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                             num_workers=16, pin_memory=True, drop_last=True)
-    logger.info("val_data finished!")
+    train_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TRAIN_FILE,
+                                     shot=config.DATA.SHOTS, type='train')
+    sampler_test = SubsetRandomSampler(np.arange(len(train_data)))
+    train_loader = DataLoader(train_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
+                             num_workers=12, pin_memory=True, drop_last=True)
 
-    # Add new train_data_a and train_load_a
-    train_data_a = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TRAIN_FILE,
-                                     shot=config.DATA.SHOTS, type='train_a')  # Change the type to 'train_a'
-    sampler_test = SubsetRandomSampler(np.arange(len(train_data_a)))
-    train_load_a = DataLoader(train_data_a, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                             num_workers=16, pin_memory=True, drop_last=True)
-    return  val_data, test_data,train_data_F,train_data_a, val_loader, test_loader,train_load_F, train_load_a
+    return  train_data, test_data, train_loader , test_loader

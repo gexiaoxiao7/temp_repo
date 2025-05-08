@@ -10,14 +10,11 @@ import time
 from tqdm import tqdm
 
 
-from model.tp import Attention
 from model.transformer import FSATransformerEncoder
 from utils.config import get_config
 from dataSets.build import build_dataloader
 from utils.logger import create_logger
-from utils.tools import AverageMeter, clip_classifier, build_cache_model, pre_load_features, split_dataset, \
-    attention_Fuc, promptlearner_Fuc, classes, visual
-from utils.tools import  search_hp
+from utils.tools import AverageMeter, classes, visual
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from timm.loss import LabelSmoothingCrossEntropy
@@ -38,138 +35,6 @@ def parse_option():
     args = parser.parse_args()
     config = get_config(args)
     return args, config
-
-def train_lp(clip_model,device,config,train_loader,class_names,attention_net, test_features, attention_test_feature,test_labels):
-
-    if config.MODEL.TEMPORAL_POOLING == 'attention':
-        attention_net.load_state_dict(
-            torch.load(config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "attention_model.pth"))
-
-    prompt_learner = tbaclip.PromptLearner(config, class_names, clip_model.model, device,logger).to(torch.half)
-
-    if os.path.exists(config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "prompt_learner.pth"):
-        prompt_learner.load_state_dict(torch.load(config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "prompt_learner.pth"))
-
-    optimizer = torch.optim.Adam(prompt_learner.parameters(), lr=config.TRAIN.LR, eps=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config.TRAIN.EPOCHS * len(train_loader))
-    criterion = LabelSmoothingCrossEntropy() if config.MODEL.LABEL_SMOOTH == 1 else nn.CrossEntropyLoss()
-    for train_idx in range(config.TRAIN.EPOCHS):
-        # Train
-        b = config.TRAIN.BATCH_SIZE
-        prompt_learner.train()
-        loss_list = []
-        logger.info('Train Epoch: {:} / {:}'.format(train_idx, config.TRAIN.EPOCHS))
-        for idx, batch_data in enumerate(tqdm(train_loader)):
-            images = batch_data['data']
-            images = torch.stack(images)
-            images = torch.transpose(images, 0, 1)
-            label_id = batch_data['label']
-            with torch.no_grad():
-                _, image_features, _,attention_format = clip_model(images)
-                if config.MODEL.TEMPORAL_POOLING == 'attention':
-                    image_features = attention_Fuc(attention_net, attention_format, image_features)
-                else:
-                    image_features /= image_features.norm(dim=-1, keepdim=True)
-            logits = []
-            prompts = prompt_learner(image_features)
-            for pts_i, imf_i in zip(prompts, image_features):
-                text_features = clip_model.text_encoder(pts_i, prompt_learner.tokenized_prompts)
-                # text_features = clip_model.module.text_encoder(pts_i, prompt_learner.tokenized_prompts)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                l_i = (clip_model.logit_scale.exp() * imf_i @ text_features.t()).softmax(dim=-1)
-                logits.append(l_i)
-            logits = torch.stack(logits)
-            # 修改成label_smooth的损失函数
-            label_id = label_id.to(logits.device)
-            loss = criterion(logits, label_id)
-
-            loss_list.append(loss.item())
-
-            optimizer.zero_grad()
-            loss.backward()
-            prompt_learner.float()
-            optimizer.step()
-            prompt_learner.half()
-            scheduler.step()
-
-        current_lr = scheduler.get_last_lr()[0]
-        print('LR: {:.6f}, Loss: {:.4f}'.format(current_lr,sum(loss_list) / len(loss_list)))
-
-        torch.save(prompt_learner.state_dict(),
-                   config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "prompt_learner.pth")
-
-    # Eval
-    video_feature = attention_Fuc(attention_net, attention_test_feature, test_features)
-    logits = promptlearner_Fuc(prompt_learner, video_feature, clip_model)
-    test_labels = test_labels.to(logits.device)
-    acc1, acc3, acc5, auc, f1 = validate(logits, test_labels)
-    logger.info(
-        "**** Test accuracy1: {:.2f}, accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
-            acc1, acc3, acc5, auc, f1))
-    return prompt_learner
-
-def train_attention(clip_model,device,config,train_loader,clip_weights,test_features, attention_test_feature,test_labels):
-    attention_net = FSATransformerEncoder(dim=clip_model.model.visual.output_dim, depth=6,
-                                      heads=1, dim_head=64,
-                                      mlp_dim=clip_model.model.visual.output_dim * 4, nt=config.DATA.NUM_FRAMES,
-                                      nh=1, nw=1,
-                                      dropout=0.1).to(device).to(torch.half)
-    if os.path.exists(config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "attention_model.pth"):
-        attention_net.load_state_dict(torch.load(config.CACHE_DIR + "/" + str(config.DATA.SHOTS) + "attention_model.pth"))
-    optimizer = torch.optim.Adam(attention_net.parameters(), lr=config.TRAIN.LR, eps=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config.TRAIN.EPOCHS * len(train_loader))
-    criterion = LabelSmoothingCrossEntropy() if config.MODEL.LABEL_SMOOTH == 1 else nn.CrossEntropyLoss()
-
-
-    for train_idx in range(config.TRAIN.EPOCHS):
-        # Train
-        b = config.TRAIN.BATCH_SIZE
-        attention_net.train()
-        loss_list = []
-        logger.info('Train Epoch: {:} / {:}'.format(train_idx, config.TRAIN.EPOCHS))
-        for idx, batch_data in enumerate(tqdm(train_loader)):
-            images = batch_data['data']
-            images = torch.stack(images)
-            images = torch.transpose(images, 0, 1)
-            label_id = batch_data['label']
-            with torch.no_grad():
-                _,image_features,_,image_features_attention = clip_model(images)
-            attention_weights = attention_net(image_features_attention)
-
-            weighted_features = torch.mul(attention_weights, image_features)
-            video_feature = torch.mean(weighted_features, dim=1)
-
-            norm = video_feature.norm(dim=-1, keepdim=True)
-            video_features = video_feature / norm
-            clip_logits = (100. * video_features @ clip_weights.T).softmax(dim=-1)
-
-            label_id = label_id.to(clip_logits.device)
-            loss = criterion(clip_logits, label_id)
-
-            loss_list.append(loss.item())
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
-        current_lr = scheduler.get_last_lr()[0]
-        print('LR: {:.6f}, Loss: {:.4f}'.format(current_lr,sum(loss_list) / len(loss_list)))
-
-        torch.save(attention_net.state_dict(), config.CACHE_DIR + "/" + str(config.DATA.SHOTS) +"attention_model.pth")
-
-    # Eval
-    video_features = attention_Fuc(attention_net, attention_test_feature, test_features)
-    clip_logits = (100. * video_features @ clip_weights.T).softmax(dim=-1)
-    test_labels = test_labels.to(clip_logits.device)
-    # logger.info(f"clip_logits shape:{clip_logits.shape}\n clip_logits:{clip_logits}")
-    # logger.info(f"test_labels shape:{test_labels.shape}\n test_labels:{test_labels}")
-    acc1, acc3, acc5, auc, f1 = validate(clip_logits, test_labels)
-    logger.info(
-        "**** Test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
-            acc1, acc3, acc5, auc, f1))
-
-    return attention_net
 
 @torch.no_grad()
 def validate(output, label, plot = False):
@@ -242,6 +107,36 @@ def validate(output, label, plot = False):
     return acc1_meter.avg, acc3_meter.avg, acc5_meter.avg, auc, f1
 
 
+def train(model,config,train_loader):
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.TRAIN.LR, eps=1e-4)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config.TRAIN.EPOCHS * len(train_loader))
+    criterion = LabelSmoothingCrossEntropy() if config.MODEL.LABEL_SMOOTH == 1 else nn.CrossEntropyLoss()
+
+    for train_idx in range(config.TRAIN.EPOCHS):
+        model.train()
+        loss_list = []
+        logger.info('Train Epoch: {:} / {:}'.format(train_idx, config.TRAIN.EPOCHS))
+        for idx, batch_data in enumerate(tqdm(train_loader)):
+            images = batch_data['data']
+            images = torch.stack(images)
+            images = torch.transpose(images, 0, 1)
+            label_id = batch_data['label']
+            logits, image_features, text_features = model(images)
+            label_id = label_id.to(logits.device)
+            loss = criterion(logits, label_id)
+
+            loss_list.append(loss.item())
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+        current_lr = scheduler.get_last_lr()[0]
+        print('LR: {:.6f}, Loss: {:.4f}'.format(current_lr,sum(loss_list) / len(loss_list)))
+
 def main(config):
     cache_dir = './caches/' +  config.DATA.DATASET + '/'
     os.makedirs(cache_dir, exist_ok=True)
@@ -256,55 +151,42 @@ def main(config):
         with open(config.OUTPUT, 'a') as f:
             # Write the column names
             f.write('Model,Arch,If_teacher,Num_Frames,Acc1,Acc3,Acc5,AUC,F1,Dataset,Shots,n_ctx,TEMPORAL_POOLING, test_file\n')
-    val_data, test_data,train_data_F,train_data_a, val_loader, test_loader,train_load_F, train_load_a = build_dataloader(config, logger)
+    train_data, test_data, train_loader, test_loader = build_dataloader(config, logger)
     class_names = [class_name for i, class_name in classes(config)]
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     model = tbaclip.returnCLIP(config, class_names, device,logger)
     logger.info("Getting textual features as CLIP's classifier.")
-    clip_weights = clip_classifier(class_names, model, config,device)
-    # Pre-load val features
-    logger.info("Loading visual features and labels from val set.")
-    val_features, val_labels,attention_val_feature = pre_load_features(config, "val", model, val_loader)
-    # Pre-load test features
-    logger.info("Loading visual features and labels from test set.")
-    test_features, test_labels, attention_test_feature = pre_load_features(config, "test", model, test_loader)
-    logger.info("Training attention Net.")
-    if config.MODEL.TEMPORAL_POOLING == 'attention' and config.MODEL.ZS == 0:
-        attention_net = train_attention(model, device, config, train_load_F, clip_weights, test_features, attention_test_feature, test_labels)
-    # use prompt_learner
-    logger.info("Training Prompt Learner.")
-    if config.MODEL.LP == 1 and config.MODEL.ZS == 0:
-        prompt_learner = train_lp(model, device, config, train_load_a, class_names,attention_net, test_features, attention_test_feature, test_labels)
 
-    if config.MODEL.ZS == 1:
-        clip_logits = (100. * val_features @ clip_weights.T).softmax(dim=-1)
-        acc1, acc3, acc5, auc, f1 = validate(clip_logits, val_labels)
-        logger.info(
-            "\n**** Zero-shot CLIP's val accuracy1: {:.2f}. accuracy3: {:.2f} accuracy5: {:.2f} auc:{:.2f} f1:{:.2f} ****\n"
-            .format(acc1, acc3, acc5, auc, f1))
-        with open(config.OUTPUT, 'a') as f:
-            f.write(
-                f'Zero-shot,{config.MODEL.ARCH},{config.MODEL.IF_TEACHER},{config.DATA.NUM_FRAMES},{acc1:.3f},{acc3:.3f},{acc5:.3f},{auc:.3f},{f1:.3f},{config.DATA.DATASET},'
-                f'0 ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
-    else:
-        if config.MODEL.TEMPORAL_POOLING == 'attention':
-            test_features = test_features.squeeze(1) if config.MODEL.TEMPORAL_POOLING != 'attention' else attention_Fuc(
-                attention_net,
-                attention_test_feature, test_features)
-            val_features = val_features.squeeze(1) if config.MODEL.TEMPORAL_POOLING != 'attention' else attention_Fuc(
-                attention_net, attention_val_feature,
-                val_features)
-        clip_logits = 100. * test_features @ clip_weights.T if config.MODEL.LP == 0 else promptlearner_Fuc(
-            prompt_learner, test_features, model)
-        acc1, acc3, acc5, auc, f1 = validate(clip_logits, test_labels)
-        logger.info(
-            "**** test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
-                acc1, acc3, acc5, auc, f1))
-        with open(config.OUTPUT, 'a') as f:
-            f.write(
-                f'Tip-Adapter-F,{config.MODEL.ARCH},{config.MODEL.IF_TEACHER},{config.DATA.NUM_FRAMES},{acc1:.3f},{acc3:.3f},{acc5:.3f},{auc:.3f},{f1:.3f},{config.DATA.DATASET},'
-                f'{config.DATA.SHOTS} ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
+    logger.info("Training Begin.")
+    if config.MODEL.ZS != 1:
+        train(model, config, train_loader)
+
+    logger.info("Eval Model on Test Set.")
+    model.eval()
+    label_list = []
+    logits_list = []
+    for idx, batch_data in enumerate(tqdm(test_loader)):
+        images = batch_data['data']
+        images = torch.stack(images)
+        images = torch.transpose(images, 0, 1)
+        label_id = batch_data['label']
+        logits, image_features, text_features = model(images)
+        logits = torch.stack(logits)
+        label_id = label_id.to(logits.device)
+        logits_list.append(logits)
+        label_list.append(label_id)
+    logits = torch.cat(logits_list)
+    label = torch.cat(label_list)
+    acc1, acc3, acc5, auc, f1 = validate(logits, label)
+    logger.info(
+        "**** Test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
+            acc1, acc3, acc5, auc, f1))
+    with open(config.OUTPUT, 'a') as f:
+        mode = "Zero-shot" if config.MODEL.ZS == 1 else "Few-shot"
+        f.write(
+            f'{mode},{config.MODEL.ARCH},{config.MODEL.IF_TEACHER},{config.DATA.NUM_FRAMES},{acc1:.3f},{acc3:.3f},{acc5:.3f},{auc:.3f},{f1:.3f},{config.DATA.DATASET},'
+            f'{config.DATA.SHOTS} ,{str(config.TEXT_PROMPT.N_CTX_PRE) + " " + str(config.TEXT_PROMPT.N_CTX_POST)},{config.MODEL.TEMPORAL_POOLING}, {config.DATA.TEST_FILE}\n')
 
 
 

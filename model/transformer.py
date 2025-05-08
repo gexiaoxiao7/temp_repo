@@ -3,6 +3,9 @@ import torch
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat
 
+from model.utils import LayerNorm
+from model.customize_visiontransformer import TSTransformer
+
 
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
@@ -12,6 +15,7 @@ class PreNorm(nn.Module):
 
     def forward(self, x, **kwargs):
         return self.fn(self.norm(x), **kwargs)
+
 
 
 class FSAttention(nn.Module):
@@ -109,3 +113,64 @@ class FSATransformerEncoder(nn.Module):
         x = torch.cat(x, dim=0)
         x = torch.flatten(x, start_dim=1, end_dim=2)
         return x
+
+class TemporalVisionTransformer(nn.Module):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int,
+                 T=8, temporal_modeling_type=None, use_checkpoint=False, num_experts=0, expert_insert_layers=[],
+                 record_routing=False, routing_type='patch-level'):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.output_dim = output_dim
+        self.temporal_modeling_type = temporal_modeling_type
+        self.T = T
+        self.use_checkpoint = use_checkpoint
+        self.record_routing = record_routing
+        self.routing_type = routing_type
+
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+
+        scale = width ** -0.5
+        self.class_embedding = nn.Parameter(scale * torch.randn(width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.ln_pre = LayerNorm(width)
+
+        self.transformer = TSTransformer(width, layers, heads, use_checkpoint=self.use_checkpoint, T=self.T,
+                                         temporal_modeling_type=self.temporal_modeling_type, num_experts=num_experts,
+                                         expert_insert_layers=expert_insert_layers, record_routing=record_routing,
+                                         routing_type=routing_type)
+
+        self.ln_post = LayerNorm(width)
+        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
+
+    def forward(self, x):
+        x, [maskf, mask] = x
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1).contiguous()  # shape = [*, grid ** 2, width] # (bxt) l c
+        B, l, c = x.shape
+        b = B // self.T
+
+        cls_token = self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype,
+                                                                   device=x.device)
+        x = torch.cat([cls_token, x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        x = self.ln_pre(x)
+
+        x = x.permute(1, 0, 2)  # NLD -> LND
+
+        if self.record_routing:
+            x, routing_state = self.transformer(x)
+        else:
+            x = self.transformer(x)
+
+        feature = x.permute(1, 0, 2)  # LND -> NLD
+
+        x = self.ln_post(feature[:, 0, :])
+
+        if self.proj is not None:
+            x = x @ self.proj
+
+        if self.record_routing:
+            return x
+        else:
+            return x

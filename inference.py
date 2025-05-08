@@ -14,7 +14,7 @@ import model.TClip as tbaclip
 import numpy as np
 from PIL import Image
 import torch.nn as nn
-from utils.tools import classes, clip_classifier, attention_Fuc, promptlearner_Fuc, search_hp
+from utils.tools import classes
 
 
 def load_model(config,settings,class_names,model,device,logger):

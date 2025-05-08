@@ -39,102 +39,12 @@ class AverageMeter:
         self.count += n
         self.avg = self.sum / self.count
 
-def clip_classifier(classnames,clip_model,config,device):
-    with torch.no_grad():
-        if config.MODEL.LP == 0:
-            prompts = ['The person was ' + x + '.' for x in classnames]
-        else:
-            prompts = classnames
-        x = [clip.tokenize(prompt).to(device) for prompt in prompts]
-        clip_weights = [clip_model.model.encode_text(i) for i in x]
-        # x = torch.cat([clip.tokenize(prompt) for prompt in prompts]).to(device)
-        clip_weights = torch.stack(clip_weights)
-        clip_weights = clip_weights.squeeze(dim=1)
-        clip_weights /= clip_weights.norm(dim=-1, keepdim=True)
-    return clip_weights
-
 def classes(config):
     print(config.DATA.LABEL_LIST)
     classes_all = pd.read_csv(config.DATA.LABEL_LIST)
     return classes_all.values.tolist()
 
-def build_cache_model(config, clip_model, train_loader_cache,logger):
-    if config.TIP_ADAPTER.LOAD_CACHE == 0:
-        cache_keys = []
-        cache_values = []
 
-        with torch.no_grad():
-            # Data augmentation for the cache model
-            for augment_idx in range(config.TIP_ADAPTER.AUGMENT_EPOCH):
-                train_features = []
-
-                logger.info('Augment Epoch: {:} / {:}'.format(augment_idx, config.TIP_ADAPTER.AUGMENT_EPOCH))
-                for idx, batch_data in enumerate(tqdm(train_loader_cache)):
-                    images = batch_data['data']
-                    images = torch.stack(images)
-                    images = torch.transpose(images, 0, 1)
-                    label_id = batch_data['label']
-                    # image_input = []
-                    # for image in images:
-                    #     image = image.cpu().numpy()
-                    #     image_input.append(image)
-                    # image_input = [item for sublist in image_input for item in sublist]
-                    _,image_features,_,_  = clip_model(images)
-                    image_features = image_features.squeeze(0)
-                    train_features.append(image_features)
-                    if augment_idx == 0:
-                        target = label_id
-                        cache_values.append(target)
-                cache_keys.append(torch.cat(train_features, dim=0).unsqueeze(0))
-
-        cache_keys = torch.cat(cache_keys, dim=0).mean(dim=0)
-        cache_keys = cache_keys.squeeze(1)
-        cache_keys /= cache_keys.norm(dim=-1, keepdim=True)
-        cache_keys = cache_keys.permute(1, 0)
-        cache_values = F.one_hot(torch.cat(cache_values, dim=0)).half()
-
-        torch.save(cache_keys, config.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-        torch.save(cache_values, config.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-
-    else:
-        cache_keys = torch.load(config.CACHE_DIR + '/keys_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-        cache_values = torch.load(config.CACHE_DIR + '/values_' + str(config.DATA.CACHE_SIZE) + "shots.pt")
-
-    return cache_keys, cache_values
-
-
-def pre_load_features(config, split, clip_model, loader):
-    
-    if (
-            os.path.exists(config.CACHE_DIR + "/" + split + "_f.pt") 
-            and os.path.exists(config.CACHE_DIR + "/" + split + "_l.pt") 
-            and os.path.exists(config.CACHE_DIR + "/" + split + "_a.pt")
-    ):
-        features = torch.load(config.CACHE_DIR + "/" + split + "_f.pt")
-        labels = torch.load(config.CACHE_DIR + "/" + split + "_l.pt")
-        attention_feature = torch.load(config.CACHE_DIR + "/" + split + "_a.pt")
-        return features, labels, attention_feature
-    else:
-        features, labels ,attention_feature = [], [], []
-        with torch.no_grad():
-            for idx, batch_data in enumerate(tqdm(loader)):
-                images = batch_data['data'] #list: len:num_frame, shape:(b,1,c,h,w)
-                images = torch.stack(images) # (num_frame,b,1,c,w,h)
-                images = torch.transpose(images, 0, 1) #(b,num_frame,1,c,w,h)
-                label_id = batch_data['label']
-                # image_feature: (b,1,768)
-                # attention_format_feature: (b, num_frame ,1,768)
-                _,image_features,_,attention_format_feature= clip_model(images)
-                image_features /= image_features.norm(dim=-1, keepdim=True)
-                features.append(image_features)
-                labels.append(label_id)
-                attention_feature.append(attention_format_feature)
-
-        features, labels, attention_feature = torch.cat(features), torch.cat(labels), torch.cat(attention_feature)
-        torch.save(features, config.CACHE_DIR + "/" + split + "_f.pt")
-        torch.save(labels, config.CACHE_DIR + "/" + split + "_l.pt")
-        torch.save(attention_feature, config.CACHE_DIR + "/" + split + "_a.pt")
-        return features, labels, attention_feature
 
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
@@ -210,43 +120,6 @@ def validate(output, label, plot = False, config = None):
 
     return acc1_meter.avg, acc3_meter.avg, acc5_meter.avg, auc, f1
 
-
-def search_hp(config, cache_keys, cache_values, features, labels, clip_weights, adapter=None):
-    if config.SEARCH_HP== 1:
-
-        beta_list = [i * (config.SEARCH_SCALE[0] - 0.1) / config.SEARCH_STEP[0] + 0.1 for i in
-                     range(config.SEARCH_STEP[0])]
-        alpha_list = [i * (config.SEARCH_SCALE[1] - 0.1) / config.SEARCH_STEP[1] + 0.1 for i in
-                      range(config.SEARCH_STEP[1])]
-
-        best_acc = 0
-        best_beta, best_alpha = 0, 0
-
-        for beta in beta_list:
-            for alpha in alpha_list:
-                if adapter:
-                    affinity = adapter(features)
-                else:
-                    affinity = features @ cache_keys
-
-                cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values.to(affinity.device)
-                clip_logits = 100. * features @ clip_weights.T
-                tip_logits = clip_logits + cache_logits * alpha
-                acc1, acc3 ,acc5, auc, f1 = validate(tip_logits, labels, plot = False, config=config)
-
-                if acc1 > best_acc:
-                    print("New best setting, beta: {:.2f}, alpha: {:.2f}; accuracy: {:.2f}".format(beta, alpha, acc1))
-                    best_acc = acc1
-                    best_beta = beta
-                    best_alpha = alpha
-
-        print("\nAfter searching, the best accuarcy: {:.2f}.\n".format(best_acc))
-
-    return best_beta, best_alpha
-
-
-
-
 def split_dataset(dataset):
     # Step 1: Create a list of indices for each label
     label_to_indices = defaultdict(list)
@@ -271,26 +144,6 @@ def split_dataset(dataset):
     subset2 = Subset(dataset, indices2)
 
     return subset1,subset2
-
-def attention_Fuc(attention_net, attention_feature, image_features):
-    attention_net.eval()
-    attention_weights = attention_net(attention_feature)
-    weighted_features = torch.mul(attention_weights, image_features)
-    video_features = torch.mean(weighted_features, dim=1)
-    return video_features / video_features.norm(dim=-1, keepdim=True)
-
-def promptlearner_Fuc(prompt_learner, image_feature, clip_model):
-    prompt_learner.eval()
-    logits = []
-    prompts = prompt_learner(image_feature)
-    for pts_i, imf_i in zip(prompts, image_feature):
-        text_features = clip_model.text_encoder(pts_i, prompt_learner.tokenized_prompts)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        l_i = (clip_model.logit_scale.exp() * imf_i @ text_features.t()).softmax(dim=-1)
-        logits.append(l_i)
-    logits = torch.stack(logits)
-    return logits
-
 
 def visulize_attention_ratio(img_path, attention_mask, ratio=0.5, cmap="jet"):
     # load the image

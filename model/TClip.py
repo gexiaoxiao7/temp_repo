@@ -6,9 +6,11 @@ from PIL import Image
 import clip
 from collections import OrderedDict
 
-from model.tp import Attention
 import cv2
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
+
+from model.transformer import FSATransformerEncoder
+
 _tokenizer = _Tokenizer()
 
 def load_clip(backbone_name, device):
@@ -23,25 +25,40 @@ class VideoEncoder(nn.Module):
         self.dtype = clip_model.dtype
         self.device = device
         self.config = config
+
+        if config.MODEL.TEMPORAL_POOLING == 'attention':
+            self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
+                                                  heads=1, dim_head=64,
+                                                  mlp_dim=clip_model.visual.output_dim * 4,
+                                                  nt=config.DATA.NUM_FRAMES,
+                                                  nh=1, nw=1,
+                                                  dropout=0.1).to(device).to(torch.half)
+
+        for name, p in self.model.named_parameters():
+            p.requires_grad = False
+
     def forward(self, images):
         video_info = images # b, n_frames, 1 , c, height, weight
         image_features = torch.stack(
             [torch.stack([self.model.encode_image(video_info[i, j].to(self.device).type(self.dtype)) for j in range(video_info.shape[1])], dim=0) for i in range(video_info.shape[0])],
             dim=0).to(torch.half)
 
-        # video_info = [torch.from_numpy(x).to(self.device).type(self.dtype) for x in video_info]
-        # image_features = [self.model.encode_image(x) for x in video_info]
-        # image_features = torch.stack(image_features, dim=1).to(torch.half)
-
         # b, n_frames, dim
-        attention_format_features = image_features
-        video_feature = torch.mean(image_features, dim=1)
-
-        # video_feature = torch.unsqueeze(video_feature, 0)
-        if self.config.MODEL.TEMPORAL_POOLING == 'mean':
-            return video_feature, None
+        if self.config.MODEL.TEMPORAL_POOLING == 'attention':
+            attention_format_features = image_features
+            image_features = image_features.squeeze(dim=2)
+            attention_weights = self.attention_net(attention_format_features)
+            weighted_features = torch.mul(attention_weights, image_features)
+            video_feature = torch.mean(weighted_features, dim=1)
+            norm = video_feature.norm(dim=-1, keepdim=True)
+            video_features = video_feature / norm
+            return video_features
+        elif self.config.MODEL.TEMPORAL_POOLING == 'mean':
+            video_feature = torch.mean(image_features, dim=1)
+            video_feature /= video_feature.norm(dim=-1, keepdim=True)
+            return video_feature
         else:
-            return video_feature, attention_format_features
+            raise NotImplementedError
 
 
 class PromptLearner(nn.Module):
@@ -169,24 +186,57 @@ class PromptLearner(nn.Module):
         return prompts # [batch, n_cls, n_tkn, ctx_dim]
 
 class TextEncoder(nn.Module):
-    def __init__(self, clip_model):
+    def __init__(self, clip_model, config, classnames, device, logger):
         super().__init__()
-        self.transformer = clip_model.transformer
-        self.positional_embedding = clip_model.positional_embedding
-        self.ln_final = clip_model.ln_final
-        self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
+        self.model = clip_model
+        self.classnames = classnames
+        self.config = config
+        self.device = device
+        # use prompt learner
+        if config.MODEL.LP == 1:
+            self.prompts_learner = PromptLearner(config, classnames, clip_model,device,logger).to(torch.half)
+            self.tokenized_prompts = self.prompts_learner.tokenized_prompts
 
-    def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
+        for name, p in self.model.named_parameters():
+            p.requires_grad = False
+
+    def forward(self, im_features):
+
+        if self.config.MODEL.LP == 1:
+            logit_scale = self.model.logit_scale.exp()
+            prompts = self.prompts_learner(im_features) # (b, n_cls, n_tkn, ctx_dim)
+            logits = []
+            for pts_i, imf_i in zip(prompts, im_features):
+                text_features = self._forward(pts_i, self.tokenized_prompts)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                l_i = (logit_scale * imf_i @ text_features.t()).softmax(dim=-1)
+                logits.append(l_i)
+            logits = torch.stack(logits)
+        else:
+            prompts = ['The person was ' + x + '.' for x in self.classnames]
+            x = [clip.tokenize(prompt).to(self.device) for prompt in prompts]
+            clip_weights = [self.model.encode_text(i) for i in x]
+            clip_weights = torch.stack(clip_weights)
+            clip_weights = clip_weights.squeeze(dim=1)
+            clip_weights /= clip_weights.norm(dim=-1, keepdim=True)
+            text_features = clip_weights
+            norm = text_features.norm(dim=-1, keepdim=True)
+            text_feature = text_features / norm
+            logits = (100.0 * im_features @ text_feature.T).softmax(dim=-1)
+
+        return logits, text_features
+
+
+    def _forward(self, prompts, tokenized_prompts=None):
+        x = prompts + self.model.positional_embedding.type(self.model.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        x = self.model.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = self.model.ln_final(x).type(self.model.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.model.text_projection
 
         return x
 
@@ -195,45 +245,29 @@ class TBA_Clip(nn.Module):
     def __init__(self, clip_model, preprocess, classnames, device, logger ,config):
         super().__init__()
         self.model = clip_model
-        self.attention = Attention(feature_dim=clip_model.visual.output_dim).to(device).to(torch.half)
-        self.prompts_learner = PromptLearner(config, classnames, clip_model,device,logger).to(torch.half)
-        self.tokenized_prompts = self.prompts_learner.tokenized_prompts
         self.preprocess = preprocess
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder = TextEncoder(clip_model,config,classnames,device,logger)
         self.image_encoder = VideoEncoder(clip_model, preprocess, config,device)
         self.dtype = clip_model.dtype
         self.config = config
         self.device = device
         self.classnames = classnames
-        self.logit_scale = clip_model.logit_scale
+
+        for name, p in self.model.named_parameters():
+            p.requires_grad = False
+
+
     def forward(self, image):
-        image_features,attention_format_features = self.image_encoder(image)
-        norm = image_features.norm(dim=-1, keepdim=True)
-        image_feature = image_features / norm
-        if self.config.MODEL.LP == 1:
-            tokenized_prompts = self.tokenized_prompts
-            logit_scale = self.logit_scale.exp()
-            prompts = self.prompts_learner(image_feature)
-            logits = []
-            for pts_i, imf_i in zip(prompts, image_feature):
-                text_features = self.text_encoder(pts_i, tokenized_prompts)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                l_i = (logit_scale * imf_i @ text_features.t()).softmax(dim=-1)
-                logits.append(l_i)
-            logits = torch.stack(logits)
-            return logits,image_features,text_features,attention_format_features
-        else:
-            x = [clip.tokenize(label).to(self.device) for label in self.classnames]
-            clip_weights = [self.model.encode_text(i) for i in x]
-            clip_weights = torch.stack(clip_weights)
-            clip_weights = clip_weights.squeeze(dim=1)
-            text_features = clip_weights
-            norm = text_features.norm(dim=-1, keepdim=True)
-            text_feature = text_features / norm
-            similarity = (100.0 * image_feature @ text_feature.T).softmax(dim=-1)
-            return similarity,image_features,text_features,attention_format_features
+        image_features = self.image_encoder(image) #(b, 1,dim)
+        logits, text_features = self.text_encoder(image_features) # (b, n_cls, dim)
+        return logits,image_features,text_features
+
+
+
 
 def returnCLIP(config,classnames,device,logger):
     clip_model, preprocess = clip.load(config.MODEL.ARCH, device = device)
     model = TBA_Clip(clip_model, preprocess,classnames,device,logger,config)
     return model
+
+

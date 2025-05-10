@@ -39,6 +39,7 @@ _C.MODEL.LABEL_SMOOTH = 1
 _C.MODEL.TEMPORAL_POOLING = 'attention'
 # if using prompt learner
 _C.MODEL.LP = 0
+_C.MODEL.ADAPTER_FUSE_TYPE = 2
 # -----------------------------------------------------------------------------
 # Training settings
 # -----------------------------------------------------------------------------

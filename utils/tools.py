@@ -16,8 +16,6 @@ import numpy as np
 import matplotlib
 import clip
 
-from model.TClip import load_clip
-
 matplotlib.use('Agg')
 from model.tld import TeacherDetection
 import matplotlib.pyplot as plt
@@ -169,7 +167,6 @@ def prepare_frames(path,num_frames,device):
         print(f"File {path} not found.")
         return None
     video_capture = cv2.VideoCapture(path)
-    model , preprocess = load_clip('ViT-L/14@336px',device)
     detector = TeacherDetection('Yolo-model/yolov8n.pt')
     total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
     frames = []

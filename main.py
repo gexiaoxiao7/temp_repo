@@ -106,6 +106,17 @@ def validate(output, label, plot = False):
 
     return acc1_meter.avg, acc3_meter.avg, acc5_meter.avg, auc, f1
 
+def get_loss(labels, clip_logits, mlp_logits, ada_logits, total_logits, lambda_value=[1.0, 1.0, 1.0, 1.0, 1.0]):
+    ce_loss = F.cross_entropy(mlp_logits, labels) * lambda_value[0]
+    ce_loss2 = F.cross_entropy(ada_logits, labels) * lambda_value[1]
+    ce_loss3 = F.cross_entropy(total_logits, labels) * lambda_value[2]
+
+    l1_loss1 = F.l1_loss(mlp_logits, clip_logits) * lambda_value[3]
+    l1_loss2 = F.l1_loss(ada_logits, clip_logits) * lambda_value[4]
+
+    loss = l1_loss1 + l1_loss2 + ce_loss + ce_loss2 + ce_loss3
+    return loss, [l1_loss1, l1_loss2, ce_loss, ce_loss2, ce_loss3]
+
 
 def train(model,config,train_loader):
 
@@ -119,21 +130,20 @@ def train(model,config,train_loader):
         loss_list = []
         logger.info('Train Epoch: {:} / {:}'.format(train_idx, config.TRAIN.EPOCHS))
         for idx, batch_data in enumerate(tqdm(train_loader)):
-            images = batch_data['data']
-            images = torch.stack(images)
-            images = torch.transpose(images, 0, 1)
-            label_id = batch_data['label']
-            logits, image_features, text_features = model(images)
-            label_id = label_id.to(logits.device)
-            loss = criterion(logits, label_id)
+            with torch.autograd.set_detect_anomaly(True):
+                images = batch_data['data']
+                images = torch.stack(images)
+                images = torch.transpose(images, 0, 1)
+                label_id = batch_data['label']
 
-            loss_list.append(loss.item())
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
+                clip_logits, mlp_logits, ada_logits, total_logits = model(images)
+                label_id = label_id.to(total_logits.device)
+                loss, losses = get_loss(label_id, clip_logits, mlp_logits, ada_logits, total_logits)
+                loss_list.append(loss.item())
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
         print('LR: {:.6f}, Loss: {:.4f}'.format(current_lr,sum(loss_list) / len(loss_list)))
 
@@ -171,9 +181,9 @@ def main(config):
         images = torch.stack(images)
         images = torch.transpose(images, 0, 1)
         label_id = batch_data['label']
-        logits, image_features, text_features = model(images)
-        label_id = label_id.to(logits.device)
-        logits_list.append(logits)
+        clip_logits, mlp_logits, ada_logits, total_logits = model(images)
+        label_id = label_id.to(total_logits.device)
+        logits_list.append(total_logits)
         label_list.append(label_id)
     logits = torch.cat(logits_list)
     label = torch.cat(label_list)

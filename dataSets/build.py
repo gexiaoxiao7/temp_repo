@@ -142,12 +142,13 @@ class SubsetRandomSampler(torch.utils.data.Sampler):
 
 def build_dataloader(config,logger):
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    pin_memory = False if device == 'mps' else True
     _, preprocess = clip.load(config.MODEL.ARCH, device=device)
 
     test_data = VideoDataset(config, preprocess=preprocess, device=device, ann_file=config.DATA.TEST_FILE,type='test')
     sampler_test = SubsetRandomSampler(np.arange(len(test_data)))
     test_loader = DataLoader(test_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                                 num_workers=12, pin_memory=True, drop_last=True)
+                                 num_workers=12, pin_memory=pin_memory, drop_last=True)
 
     logger.info("test_data_finished!")
 
@@ -155,6 +156,6 @@ def build_dataloader(config,logger):
                                      shot=config.DATA.SHOTS, type='train')
     sampler_test = SubsetRandomSampler(np.arange(len(train_data)))
     train_loader = DataLoader(train_data, batch_size=config.TRAIN.BATCH_SIZE, sampler=sampler_test,
-                             num_workers=12, pin_memory=True, drop_last=True)
+                             num_workers=12, pin_memory=pin_memory, drop_last=True)
 
     return  train_data, test_data, train_loader , test_loader

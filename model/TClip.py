@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from PIL import Image
-import clip
+import model.clip as clip
 from collections import OrderedDict
 
 import cv2
@@ -12,10 +12,6 @@ from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 from model.transformer import FSATransformerEncoder
 
 _tokenizer = _Tokenizer()
-
-def load_clip(backbone_name, device):
-    model, preprocess = clip.load(backbone_name, device=device)
-    return model, preprocess
 
 class VideoEncoder(nn.Module):
     def __init__(self, clip_model, preprocess,config,device):
@@ -26,27 +22,32 @@ class VideoEncoder(nn.Module):
         self.device = device
         self.config = config
 
-        if config.MODEL.TEMPORAL_POOLING == 'attention':
-            self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
-                                                  heads=1, dim_head=64,
-                                                  mlp_dim=clip_model.visual.output_dim * 4,
-                                                  nt=config.DATA.NUM_FRAMES,
-                                                  nh=1, nw=1,
-                                                  dropout=0.1).to(device).to(torch.half)
+        # if config.MODEL.TEMPORAL_POOLING == 'attention':
+        #     self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
+        #                                           heads=1, dim_head=64,
+        #                                           mlp_dim=clip_model.visual.output_dim * 4,
+        #                                           nt=config.DATA.NUM_FRAMES,
+        #                                           nh=1, nw=1,
+        #                                           dropout=0.1).to(device).to(torch.half)
 
         for name, p in self.model.named_parameters():
-            p.requires_grad = False
+            if 'visual.adapter.' not in name:
+                p.requires_grad = False
+
 
     def forward(self, images):
         video_info = images # b, n_frames, 1 , c, height, weight
-        image_features = torch.stack(
-            [torch.stack([self.model.encode_image(video_info[i, j].to(self.device).type(self.dtype)) for j in range(video_info.shape[1])], dim=0) for i in range(video_info.shape[0])],
-            dim=0).to(torch.half)
-
+        b, n_frames,_,c,h,w = video_info.shape
+        video_info = video_info.reshape(-1, c,h,w)
+        visual_features, mlp_logits, fused_feats = self.model.encode_image(video_info.to(self.device).to(self.dtype))
+        # b*n_frames, dim -> b, n_frames, dim
+        visual_features = visual_features.reshape(b,n_frames, -1)
+        mlp_logits = mlp_logits.reshape(b,n_frames, -1)
+        fused_feats = fused_feats.reshape(b,n_frames, -1)
         # b, n_frames, dim
         if self.config.MODEL.TEMPORAL_POOLING == 'attention':
-            attention_format_features = image_features
-            image_features = image_features.squeeze(dim=2)
+            attention_format_features = visual_features
+            image_features = visual_features.squeeze(dim=2)
             attention_weights = self.attention_net(attention_format_features)
             weighted_features = torch.mul(attention_weights, image_features)
             video_feature = torch.mean(weighted_features, dim=1)
@@ -54,9 +55,13 @@ class VideoEncoder(nn.Module):
             video_features = video_feature / norm
             return video_features
         elif self.config.MODEL.TEMPORAL_POOLING == 'mean':
-            video_feature = torch.mean(image_features, dim=1)
-            video_feature /= video_feature.norm(dim=-1, keepdim=True)
-            return video_feature
+            visual_features = torch.mean(visual_features, dim=1)
+            visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
+            mlp_logits = torch.mean(mlp_logits, dim=1)
+            mlp_logits = mlp_logits / mlp_logits.norm(dim=-1, keepdim=True)
+            fused_feats = torch.mean(fused_feats, dim=1)
+            fused_feats = fused_feats / fused_feats.norm(dim=-1, keepdim=True)
+            return visual_features, mlp_logits, fused_feats
         else:
             raise NotImplementedError
 
@@ -111,9 +116,9 @@ class PromptLearner(nn.Module):
 
         self.meta_net = nn.Sequential(OrderedDict([
             ("linear1", nn.Linear(vis_dim, vis_dim // 16)),
-            ("relu", nn.ReLU(inplace=True)),
+            ("relu", nn.ReLU(inplace=False)),
             ("linear2", nn.Linear(vis_dim // 16, ctx_dim))
-        ])).to(device).to(torch.half)
+        ])).to(device)
 
         classnames = [name.replace("_", " ") for name in classnames]
         name_lens = [len(_tokenizer.encode(name)) for name in classnames]
@@ -194,11 +199,12 @@ class TextEncoder(nn.Module):
         self.device = device
         # use prompt learner
         if config.MODEL.LP == 1:
-            self.prompts_learner = PromptLearner(config, classnames, clip_model,device,logger).to(torch.half)
+            self.prompts_learner = PromptLearner(config, classnames, clip_model,device,logger)
             self.tokenized_prompts = self.prompts_learner.tokenized_prompts
 
         for name, p in self.model.named_parameters():
-            p.requires_grad = False
+            if 'visual.adapter.' not in name:
+                p.requires_grad = False
 
     def forward(self, im_features):
 
@@ -224,7 +230,7 @@ class TextEncoder(nn.Module):
             text_feature = text_features / norm
             logits = (100.0 * im_features @ text_feature.T).softmax(dim=-1)
 
-        return logits, text_features
+        return logits
 
 
     def _forward(self, prompts, tokenized_prompts=None):
@@ -253,21 +259,41 @@ class TBA_Clip(nn.Module):
         self.device = device
         self.classnames = classnames
 
+        feature_dim = clip_model.visual.output_dim
+        num_classes = config.DATA.NUM_CLASSES
+        self.adapter = nn.ModuleDict({
+            "adapter_1": nn.Sequential(nn.Linear(num_classes, feature_dim, bias=False), nn.BatchNorm1d(feature_dim),
+                                       nn.ReLU(inplace=False), nn.Linear(feature_dim, feature_dim, bias=False)),
+            "adapter_2": nn.Sequential(nn.Linear(feature_dim, feature_dim, bias=False), nn.BatchNorm1d(feature_dim),
+                                       nn.ReLU(inplace=False), nn.Linear(feature_dim, feature_dim, bias=False)),
+            "adapter_3": nn.Sequential(nn.Linear(feature_dim, feature_dim, bias=False), nn.BatchNorm1d(feature_dim),
+                                       nn.ReLU(inplace=False), nn.Linear(feature_dim, num_classes, bias=False)),
+            "g_weight": nn.Sequential(nn.Linear(feature_dim, feature_dim, bias=False), nn.BatchNorm1d(feature_dim),
+                                      nn.ReLU(inplace=False), nn.Linear(feature_dim, 1, bias=False), nn.Sigmoid()),
+        })
+
         for name, p in self.model.named_parameters():
-            p.requires_grad = False
+            if 'visual.adapter.' not in name:
+                p.requires_grad = False
+
+
 
 
     def forward(self, image):
-        image_features = self.image_encoder(image) #(b, 1,dim)
-        logits, text_features = self.text_encoder(image_features) # (b, n_cls, dim)
-        return logits,image_features,text_features
+        visual_feats, mlp_logits, fused_feats = self.image_encoder(image) #(b, 1,dim)
+        clip_logits = self.text_encoder(visual_feats) # (b, n_cls, dim)
+        ada_logits = clip_logits + self.adapter["adapter_3"](
+            self.adapter["adapter_1"](clip_logits) + self.adapter["adapter_2"](fused_feats))
+        weight = self.adapter["g_weight"](fused_feats)  # logits weight
+        total_logits = weight * mlp_logits + (1 - weight) * ada_logits
+        return clip_logits, mlp_logits, ada_logits, total_logits
 
 
 
 
 def returnCLIP(config,classnames,device,logger):
-    clip_model, preprocess = clip.load(config.MODEL.ARCH, device = device)
-    model = TBA_Clip(clip_model, preprocess,classnames,device,logger,config)
+    clip_model, preprocess = clip.load(config.MODEL.ARCH, device = device, config=config)
+    model = TBA_Clip(clip_model, preprocess,classnames,device,logger,config).to(device)
     return model
 
 

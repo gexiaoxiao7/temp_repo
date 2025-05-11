@@ -27,14 +27,10 @@ class VideoEncoder(nn.Module):
             self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
                                                   heads=1, dim_head=64,
                                                   mlp_dim=clip_model.visual.output_dim * 4,
-                                                  t=config.DATA.NUM_FRAMES,
-                                                  h=preprocess.transforms[0].size, w=preprocess.transforms[0].size,
-                                                  dropout=0.1, patch_h=8, patch_w=8, patch_t=8).to(device).to(torch.half)
-
+                                                  dropout=0.1).to(device)
         for name, p in self.model.named_parameters():
             if 'visual.adapter.' not in name:
                 p.requires_grad = False
-
 
     def forward(self, images):
         video_info = images # b, n_frames, 1 , c, height, weight
@@ -46,14 +42,10 @@ class VideoEncoder(nn.Module):
         mlp_logits = mlp_logits.reshape(b,n_frames, -1)
         fused_feats = fused_feats.reshape(b,n_frames, -1)
         # b, n_frames, dim
-
         if self.config.MODEL.TEMPORAL_POOLING == 'fsattention':
-            video_info = rearrange(video_info, '(b t) c h w -> b c t h w', t=n_frames).to(self.device)
-            _, attn_weights = self.attention_net(video_info)
-            weighted_features = torch.mul(attn_weights, visual_features)
-            visual_features = torch.mean(weighted_features, dim=1)
-
-
+            visual_features= self.attention_net(visual_features)
+            with torch.no_grad():
+                fused_feats = self.attention_net(fused_feats)
         visual_features = torch.mean(visual_features, dim=1)
         visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
         mlp_logits = torch.mean(mlp_logits, dim=1)

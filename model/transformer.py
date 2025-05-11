@@ -47,7 +47,7 @@ class FSAttention(nn.Module):
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out), attn
+        return self.to_out(out)
 
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
@@ -67,30 +67,9 @@ class FeedForward(nn.Module):
 class FSATransformerEncoder(nn.Module):
     """Factorized Self-Attention Transformer Encoder"""
 
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, t, h, w, patch_t, patch_h, patch_w, dropout=0., channels=3):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
         super().__init__()
         self.layers = nn.ModuleList([])
-        self.T = t
-        self.H = h
-        self.W = w
-        self.channels = channels
-        self.t = patch_t
-        self.h = patch_h
-        self.w = patch_w
-
-        self.nt = self.T // self.t
-        self.nh = self.H // self.h
-        self.nw = self.W // self.w
-
-        tubelet_dim = self.t * self.h * self.w * channels
-
-        self.to_tubelet_embedding = nn.Sequential(
-            Rearrange('b c (t pt) (h ph) (w pw) -> b t (h w) (pt ph pw c)', pt=self.t, ph=self.h, pw=self.w),
-            nn.Linear(tubelet_dim, dim)
-        )
-        self.pos_embedding = nn.Parameter(torch.randn(1, 1, self.nh * self.nw, dim)).repeat(1, self.nt, 1, 1)
-        self.dropout = nn.Dropout(dropout)
-
         for _ in range(depth):
             self.layers.append(nn.ModuleList(
                 [PreNorm(dim, FSAttention(dim, heads=heads, dim_head=dim_head, dropout=dropout)),
@@ -99,15 +78,12 @@ class FSATransformerEncoder(nn.Module):
                  ]))
 
     def forward(self, x):
-        tokens = self.to_tubelet_embedding(x)
-        tokens += self.pos_embedding
-        x = self.dropout(tokens)
-
+        x = x.unsqueeze(2)
         b = x.shape[0]
         x = torch.flatten(x, start_dim=0, end_dim=1)  # extract spatial tokens from x
 
         for sp_attn, temp_attn, ff in self.layers:
-            t, _ = sp_attn(x)
+            t = sp_attn(x)
             sp_attn_x = t + x  # Spatial attention
 
             # Reshape tensors for temporal attention
@@ -116,7 +92,7 @@ class FSATransformerEncoder(nn.Module):
             sp_attn_x = torch.cat(sp_attn_x, dim=0).transpose(1, 2)
             sp_attn_x = torch.flatten(sp_attn_x, start_dim=0, end_dim=1)
 
-            t, temp_attn_weights = temp_attn(sp_attn_x)
+            t = temp_attn(sp_attn_x)
             temp_attn_x = t + sp_attn_x  # Temporal attention
 
 
@@ -133,7 +109,7 @@ class FSATransformerEncoder(nn.Module):
         x = [temp[None] for temp in x]
         x = torch.cat(x, dim=0)
         x = torch.flatten(x, start_dim=1, end_dim=2)
-        return x, temp_attn_weights
+        return x
 
 class TemporalVisionTransformer(nn.Module):
     def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int,

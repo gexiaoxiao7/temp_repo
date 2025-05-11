@@ -175,7 +175,14 @@ def main(config):
     logger.info("Eval Model on Test Set.")
     model.eval()
     label_list = []
-    logits_list = []
+
+    logits_list = {
+        'clip_logits_list' : [],
+        'mlp_logits_list' : [],
+        'ada_logits_list' : [],
+        'total_logits_list' : []
+    }
+
     for idx, batch_data in enumerate(tqdm(test_loader)):
         images = batch_data['data']
         images = torch.stack(images)
@@ -183,14 +190,28 @@ def main(config):
         label_id = batch_data['label']
         clip_logits, mlp_logits, ada_logits, total_logits = model(images)
         label_id = label_id.to(total_logits.device)
-        logits_list.append(total_logits)
+
+        logits_list['clip_logits_list'].append(clip_logits)
+        logits_list['mlp_logits_list'].append(mlp_logits)
+        logits_list['ada_logits_list'].append(ada_logits)
+        logits_list['total_logits_list'].append(total_logits)
         label_list.append(label_id)
-    logits = torch.cat(logits_list)
+
+    logits_list = {
+        'clip_logits_list' : torch.cat(logits_list['clip_logits_list']),
+        'mlp_logits_list' : torch.cat(logits_list['mlp_logits_list']),
+        'ada_logits_list' : torch.cat(logits_list['ada_logits_list']),
+        'total_logits_list' : torch.cat(logits_list['total_logits_list'])
+    }
     label = torch.cat(label_list)
-    acc1, acc3, acc5, auc, f1 = validate(logits, label)
-    logger.info(
-        "**** Test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
-            acc1, acc3, acc5, auc, f1))
+
+    for key, value in logits_list.items():
+        acc1, acc3, acc5, auc, f1 = validate(value, label)
+        logger.info(
+            "**** Test accuracy1: {:.2f}. , accuracy3: {:.2f},accuracy5: {:.2f}. auc: {:.2f}, f1: {:.2f}****\n".format(
+                acc1, acc3, acc5, auc, f1))
+
+
     with open(config.OUTPUT, 'a') as f:
         mode = "Zero-shot" if config.MODEL.ZS == 1 else "Few-shot"
         f.write(

@@ -10,7 +10,7 @@ from einops import rearrange
 import cv2
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 
-from model.transformer import ViViTBackbone
+from model.transformer import FSATransformerEncoder
 
 _tokenizer = _Tokenizer()
 
@@ -24,20 +24,12 @@ class VideoEncoder(nn.Module):
         self.config = config
 
         if config.MODEL.TEMPORAL_POOLING == 'fsattention':
-            print(preprocess.transforms[0].size)
-            self.attention_net = ViViTBackbone(
-                t=config.DATA.NUM_FRAMES,
-                h=preprocess.transforms[0].size,
-                w=preprocess.transforms[0].size,
-                patch_t=8,
-                patch_h=4,
-                patch_w=4,
-                dim=clip_model.visual.output_dim,
-                depth=6,
-                heads=4,
-                device=device,
-                mlp_dim=8,
-            ).to(self.device)
+            self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
+                                                  heads=1, dim_head=64,
+                                                  mlp_dim=clip_model.visual.output_dim * 4,
+                                                  t=config.DATA.NUM_FRAMES,
+                                                  h=preprocess.transforms[0].size, w=preprocess.transforms[0].size,
+                                                  dropout=0.1, patch_h=8, patch_w=8, patch_t=8).to(device).to(torch.half)
 
         for name, p in self.model.named_parameters():
             if 'visual.adapter.' not in name:
@@ -56,8 +48,7 @@ class VideoEncoder(nn.Module):
         # b, n_frames, dim
 
         if self.config.MODEL.TEMPORAL_POOLING == 'fsattention':
-            # b*t, c, h, w -> b, c, t, h, w
-            video_info = rearrange(video_info, '(b t) c h w -> b c t h w', b=b,t=n_frames).to(self.device)
+            video_info = rearrange(video_info, '(b t) c h w -> b c t h w', t=n_frames).to(self.device)
             _, attn_weights = self.attention_net(video_info)
             weighted_features = torch.mul(attn_weights, visual_features)
             visual_features = torch.mean(weighted_features, dim=1)

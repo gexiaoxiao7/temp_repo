@@ -5,11 +5,12 @@ from torch import nn
 from PIL import Image
 import model.clip as clip
 from collections import OrderedDict
+from einops import rearrange
 
 import cv2
 from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 
-from model.transformer import FSATransformerEncoder
+from model.transformer import ViViTBackbone
 
 _tokenizer = _Tokenizer()
 
@@ -22,13 +23,21 @@ class VideoEncoder(nn.Module):
         self.device = device
         self.config = config
 
-        # if config.MODEL.TEMPORAL_POOLING == 'attention':
-        #     self.attention_net = FSATransformerEncoder(dim=clip_model.visual.output_dim, depth=6,
-        #                                           heads=1, dim_head=64,
-        #                                           mlp_dim=clip_model.visual.output_dim * 4,
-        #                                           nt=config.DATA.NUM_FRAMES,
-        #                                           nh=1, nw=1,
-        #                                           dropout=0.1).to(device).to(torch.half)
+        if config.MODEL.TEMPORAL_POOLING == 'fsattention':
+            print(preprocess.transforms[0].size)
+            self.attention_net = ViViTBackbone(
+                t=config.DATA.NUM_FRAMES,
+                h=preprocess.transforms[0].size,
+                w=preprocess.transforms[0].size,
+                patch_t=8,
+                patch_h=4,
+                patch_w=4,
+                dim=clip_model.visual.output_dim,
+                depth=6,
+                heads=4,
+                device=device,
+                mlp_dim=8,
+            ).to(self.device)
 
         for name, p in self.model.named_parameters():
             if 'visual.adapter.' not in name:
@@ -45,25 +54,23 @@ class VideoEncoder(nn.Module):
         mlp_logits = mlp_logits.reshape(b,n_frames, -1)
         fused_feats = fused_feats.reshape(b,n_frames, -1)
         # b, n_frames, dim
-        if self.config.MODEL.TEMPORAL_POOLING == 'attention':
-            attention_format_features = visual_features
-            image_features = visual_features.squeeze(dim=2)
-            attention_weights = self.attention_net(attention_format_features)
-            weighted_features = torch.mul(attention_weights, image_features)
-            video_feature = torch.mean(weighted_features, dim=1)
-            norm = video_feature.norm(dim=-1, keepdim=True)
-            video_features = video_feature / norm
-            return video_features
-        elif self.config.MODEL.TEMPORAL_POOLING == 'mean':
-            visual_features = torch.mean(visual_features, dim=1)
-            visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
-            mlp_logits = torch.mean(mlp_logits, dim=1)
-            mlp_logits = mlp_logits / mlp_logits.norm(dim=-1, keepdim=True)
-            fused_feats = torch.mean(fused_feats, dim=1)
-            fused_feats = fused_feats / fused_feats.norm(dim=-1, keepdim=True)
-            return visual_features, mlp_logits, fused_feats
-        else:
-            raise NotImplementedError
+
+        if self.config.MODEL.TEMPORAL_POOLING == 'fsattention':
+            # b*t, c, h, w -> b, c, t, h, w
+            video_info = rearrange(video_info, '(b t) c h w -> b c t h w', b=b,t=n_frames).to(self.device)
+            _, attn_weights = self.attention_net(video_info)
+            weighted_features = torch.mul(attn_weights, visual_features)
+            visual_features = torch.mean(weighted_features, dim=1)
+
+
+        visual_features = torch.mean(visual_features, dim=1)
+        visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
+        mlp_logits = torch.mean(mlp_logits, dim=1)
+        mlp_logits = mlp_logits / mlp_logits.norm(dim=-1, keepdim=True)
+        fused_feats = torch.mean(fused_feats, dim=1)
+        fused_feats = fused_feats / fused_feats.norm(dim=-1, keepdim=True)
+        return visual_features, mlp_logits, fused_feats
+
 
 
 class PromptLearner(nn.Module):

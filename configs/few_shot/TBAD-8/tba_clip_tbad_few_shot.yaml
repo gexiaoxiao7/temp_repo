@@ -16,7 +16,7 @@ MODEL:
     IF_TEACHER: 1
     ZS: 0
     LABEL_SMOOTH: 1
-    TEMPORAL_POOLING: 'mean'
+    TEMPORAL_POOLING: 'fsattention'
     LP: 1
     ADAPTER_FUSE_TYPE: 2
 TRAIN:
